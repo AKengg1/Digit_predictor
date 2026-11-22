@@ -27,7 +27,7 @@ app.add_middleware(
         "http://localhost:5173",   # Vite
         "http://127.0.0.1:5173",
         "http://localhost:3000",
-        "https://frontend-jade-six-96.vercel.app/", # Create React App / Next.js
+        "https://frontend-jade-six-96.vercel.app",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
