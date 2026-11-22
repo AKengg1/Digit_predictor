@@ -7,6 +7,7 @@ const INK_THRESHOLD = 20; // red value above this counts as "chalk"
 
 /* ------------------------------------------------------------------ */
 /* Canvas -> 784 numbers, prepared the way MNIST digits were prepared  */
+/* (unchanged: the model depends on this exact preprocessing)          */
 /* ------------------------------------------------------------------ */
 function canvasToPixels(canvas) {
   const ctx = canvas.getContext("2d");
@@ -85,12 +86,14 @@ function canvasToPixels(canvas) {
 /* ------------------------------------------------------------------ */
 export default function App() {
   const canvasRef = useRef(null);
+  const resultRef = useRef(null);
   const drawing = useRef(false);
   const last = useRef({ x: 0, y: 0 });
 
   const [status, setStatus] = useState("idle"); // idle | loading | done | error
   const [result, setResult] = useState(null);
   const [message, setMessage] = useState("");
+  const [runs, setRuns] = useState(0); // bumps on every answer so the chalk animation replays
 
   function resetBoard() {
     const ctx = canvasRef.current.getContext("2d");
@@ -105,6 +108,13 @@ export default function App() {
   useEffect(() => {
     resetBoard();
   }, []);
+
+  // On phones the answer sits below the fold: bring it into view
+  useEffect(() => {
+    if (status === "done" || status === "error") {
+      resultRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [status]);
 
   // Pointer position in canvas coordinates (works at any displayed size)
   function point(e) {
@@ -129,13 +139,18 @@ export default function App() {
 
   function onPointerMove(e) {
     if (!drawing.current) return;
-    const p = point(e);
     const ctx = canvasRef.current.getContext("2d");
+    // Touch screens batch their samples: using them all keeps fast strokes smooth
+    const batch = e.nativeEvent.getCoalescedEvents?.();
+    const samples = batch && batch.length ? batch : [e];
     ctx.beginPath();
     ctx.moveTo(last.current.x, last.current.y);
-    ctx.lineTo(p.x, p.y);
+    for (const s of samples) {
+      const p = point(s);
+      ctx.lineTo(p.x, p.y);
+      last.current = p;
+    }
     ctx.stroke();
-    last.current = p;
   }
 
   function stopDrawing() {
@@ -147,13 +162,14 @@ export default function App() {
     setResult(null);
     setMessage("");
     setStatus("idle");
+    canvasRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
   async function recognize() {
     const pixels = canvasToPixels(canvasRef.current);
     if (!pixels) {
       setStatus("error");
-      setMessage("The board is empty. Draw a digit, then choose Recognize digit.");
+      setMessage("The board is empty. Draw a digit, then tap Recognize digit.");
       return;
     }
 
@@ -170,7 +186,7 @@ export default function App() {
     } catch {
       setStatus("error");
       setMessage(
-        "Can’t reach the model. Start the API with “uvicorn main:app --reload” in the web folder, then try again."
+        "Can’t reach the model. Check your connection and try again. Running locally? Start the API with “uvicorn main:app --reload”."
       );
       return;
     }
@@ -189,89 +205,100 @@ export default function App() {
     }
 
     setResult(await res.json());
+    setRuns((n) => n + 1);
     setStatus("done");
   }
 
+  const done = status === "done" && result;
   const confidence = result ? Math.round(result.probabilities[result.digit] * 100) : 0;
 
   return (
     <div className="dr-app">
       <style>{css}</style>
 
-      <header className="dr-header">
-        <h1>Digit Reader</h1>
-        <p>
-          Draw one digit from 0 to 9. A neural network built from scratch in NumPy reads it.
-        </p>
-      </header>
+      <div className="dr-frame">
+        <div className="dr-board">
+          <header className="dr-header">
+            <h1>Digit Reader</h1>
+            <svg className="dr-scribble" viewBox="0 0 150 10" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M2 6 C 25 1, 40 9, 70 5 S 115 2, 148 6" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+            </svg>
+            <p>
+              Draw one digit from 0 to 9. A neural network built from scratch in NumPy reads it.
+            </p>
+          </header>
 
-      <main className="dr-layout">
-        <section aria-label="Drawing board">
-          <div className="dr-frame">
-            <canvas
-              ref={canvasRef}
-              className="dr-canvas"
-              width={SIZE}
-              height={SIZE}
-              role="img"
-              aria-label="Drawing board. Draw a digit with your mouse, finger or pen."
-              onPointerDown={onPointerDown}
-              onPointerMove={onPointerMove}
-              onPointerUp={stopDrawing}
-              onPointerCancel={stopDrawing}
-            />
-          </div>
-          <div className="dr-actions">
+          <main className="dr-layout">
+            <section className="dr-pad" aria-label="Drawing board">
+              <canvas
+                ref={canvasRef}
+                className="dr-canvas"
+                width={SIZE}
+                height={SIZE}
+                role="img"
+                aria-label="Drawing board. Draw a digit with your mouse, finger or pen."
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={stopDrawing}
+                onPointerCancel={stopDrawing}
+                onContextMenu={(e) => e.preventDefault()}
+              />
+            </section>
+
+            <section ref={resultRef} className="dr-result" aria-label="Result" aria-live="polite">
+              {status === "error" ? (
+                <p className="dr-error">{message}</p>
+              ) : (
+                <div className="dr-verdict">
+                  <span key={runs} className={"dr-digit" + (done ? " is-on" : "")}>
+                    {done ? result.digit : "?"}
+                  </span>
+                  {done ? (
+                    <p className="dr-sure">
+                      <strong>{confidence}%</strong> sure
+                    </p>
+                  ) : (
+                    <p className="dr-hint">
+                      {status === "loading"
+                        ? "Reading your digit…"
+                        : "Draw a digit on the board, then tap Recognize digit."}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <ul className="dr-bars" key={runs} aria-label="Probability for each digit">
+                {Array.from({ length: 10 }, (_, d) => {
+                  const p = done ? result.probabilities[d] : 0;
+                  const top = done && d === result.digit;
+                  return (
+                    <li key={d} className={"dr-col" + (top ? " is-top" : "")} style={{ "--i": d }}>
+                      <span className="dr-label">{d}</span>
+                      <span className="dr-pct">{done ? (p < 0.01 ? "<1" : Math.round(p * 100)) : ""}</span>
+                      <span className="dr-track">
+                        <span className="dr-fill" style={{ height: `${(p * 100).toFixed(1)}%` }} />
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          </main>
+
+          <div className="dr-tray">
+            <button className="dr-btn dr-eraser" onClick={clearBoard}>
+              Clear
+            </button>
             <button
-              className="dr-btn dr-btn-primary"
+              className="dr-btn dr-chalk"
               onClick={recognize}
               disabled={status === "loading"}
             >
               Recognize digit
             </button>
-            <button className="dr-btn dr-btn-quiet" onClick={clearBoard}>
-              Clear board
-            </button>
           </div>
-        </section>
-
-        <section className="dr-board" aria-label="Result" aria-live="polite">
-          {status === "idle" && (
-            <p className="dr-hint">
-              Draw a digit on the board, then choose Recognize digit.
-            </p>
-          )}
-
-          {status === "loading" && <p className="dr-hint">Reading your digit…</p>}
-
-          {status === "error" && <p className="dr-error">{message}</p>}
-
-          {status === "done" && result && (
-            <>
-              <div className="dr-verdict">
-                <span className="dr-digit">{result.digit}</span>
-                <span className="dr-sure">{confidence}% sure</span>
-              </div>
-              <ul className="dr-rows">
-                {result.probabilities.map((p, digit) => (
-                  <li key={digit} className="dr-row">
-                    <span className="dr-label">{digit}</span>
-                    <span className="dr-track">
-                      <span
-                        className={
-                          "dr-fill" + (digit === result.digit ? " dr-fill-top" : "")
-                        }
-                        style={{ width: `${(p * 100).toFixed(1)}%` }}
-                      />
-                    </span>
-                    <span className="dr-pct">{(p * 100).toFixed(1)}%</span>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </section>
-      </main>
+        </div>
+      </div>
     </div>
   );
 }
@@ -280,130 +307,216 @@ export default function App() {
 /* Styles (scoped with the dr- prefix so nothing else is affected)     */
 /* ------------------------------------------------------------------ */
 const css = `
-@import url("https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Source+Sans+3:wght@400;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Source+Sans+3:wght@400;600;700&display=swap");
 
 .dr-app {
-  --sage: #d5dfdb;
-  --ink: #1c2a29;
-  --oak: #9b7b58;
-  --oak-dark: #6f5237;
-  --slate: #213230;
-  --chalk: #f3f2ea;
-  --chalk-dim: #a9b5b1;
+  --wall: #d5dfdb;
+  --chalk: #f4f3ea;
+  --dim: #a9b9b3;
+  --gold: #f5d76e;
   --sky: #8ec5e8;
-  --error: #f2a9a0;
+  --error: #f4a8a0;
+  --oak: #a47a4f;
+  --oak-hi: #c9a272;
+  --oak-lo: #6c4c2e;
 
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
   min-height: 100vh;
-  padding: 40px 20px 56px;
-  background: var(--sage);
-  color: var(--ink);
+  min-height: 100dvh;
+  padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom));
+  background: var(--wall);
+  color: var(--chalk);
   font-family: "Source Sans 3", system-ui, sans-serif;
   text-align: left;
+  -webkit-text-size-adjust: 100%;
 }
 .dr-app *, .dr-app *::before, .dr-app *::after { box-sizing: border-box; }
 
-.dr-header { max-width: 880px; margin: 0 auto; }
-.dr-header h1 {
-  margin: 0 0 8px;
-  font-family: "Patrick Hand", "Comic Sans MS", cursive;
-  font-size: 48px;
-  font-weight: 400;
-  line-height: 1.1;
+/* Wooden frame + slate board. On phones the board fills the screen. */
+.dr-frame {
+  display: flex;
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: 940px;
+  padding: 7px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, var(--oak-hi), var(--oak) 40%, var(--oak-lo));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 20px 40px -20px rgba(18, 32, 29, 0.55);
 }
-.dr-header p { margin: 0; max-width: 52ch; font-size: 18px; line-height: 1.5; }
+.dr-board {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: 18px 14px 0;
+  border-radius: 12px;
+  background:
+    radial-gradient(60% 40% at 18% 14%, rgba(255, 255, 255, 0.05), transparent 70%),
+    radial-gradient(50% 35% at 82% 68%, rgba(255, 255, 255, 0.04), transparent 70%),
+    radial-gradient(120% 90% at 50% 0%, #2b4b44 0%, #1d342f 75%);
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25), inset 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.dr-header h1 {
+  margin: 0;
+  font: 400 clamp(40px, 12vw, 54px) / 1 "Patrick Hand", "Comic Sans MS", cursive;
+  text-shadow: 0 0 14px rgba(244, 243, 234, 0.25);
+}
+.dr-scribble { display: block; width: 150px; height: 10px; margin: 4px 0 10px; color: var(--gold); }
+.dr-header p { margin: 0; max-width: 46ch; font-size: 16px; line-height: 1.5; color: var(--dim); }
 
 .dr-layout {
   display: grid;
+  flex: 1;
   grid-template-columns: minmax(0, 1fr);
-  gap: 32px;
-  max-width: 880px;
-  margin: 32px auto 0;
-}
-@media (min-width: 760px) {
-  .dr-layout { grid-template-columns: minmax(0, 360px) minmax(0, 1fr); align-items: start; }
+  align-content: start;
+  gap: 22px;
+  margin-top: 20px;
 }
 
-.dr-frame {
-  padding: 14px;
-  background: var(--oak);
-  border-radius: 6px;
-  box-shadow: inset 0 0 0 2px var(--oak-dark);
+/* The pad: you write straight onto the slate (the black canvas is screen-blended away) */
+.dr-pad {
+  padding: 8px;
+  border: 2px dashed rgba(244, 243, 234, 0.3);
+  border-radius: 22px;
+  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.22);
 }
 .dr-canvas {
   display: block;
   width: 100%;
   height: auto;
   aspect-ratio: 1;
+  border-radius: 14px;
   background: #000;
-  border-radius: 2px;
+  mix-blend-mode: screen;
   cursor: crosshair;
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
-.dr-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
-.dr-btn {
-  padding: 11px 20px;
-  border: 2px solid var(--ink);
-  border-radius: 6px;
-  font: 600 16px "Source Sans 3", system-ui, sans-serif;
-  cursor: pointer;
+/* Result */
+.dr-result { scroll-margin-bottom: calc(110px + env(safe-area-inset-bottom)); }
+.dr-verdict { display: flex; align-items: center; gap: 16px; min-height: 104px; }
+.dr-digit {
+  min-width: 0.62em;
+  font: 400 112px / 1 "Patrick Hand", "Comic Sans MS", cursive;
+  text-align: center;
+  color: rgba(244, 243, 234, 0.2);
 }
-.dr-btn-primary { background: var(--ink); color: var(--chalk); }
-.dr-btn-quiet { background: transparent; color: var(--ink); }
-.dr-btn:disabled { opacity: 0.55; cursor: wait; }
-.dr-btn:focus-visible { outline: 3px solid var(--oak-dark); outline-offset: 3px; }
+.dr-digit.is-on {
+  color: var(--gold);
+  text-shadow: 0 0 22px rgba(245, 215, 110, 0.38);
+  animation: dr-pop 0.45s cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+@keyframes dr-pop { from { transform: scale(0.55) rotate(-6deg); opacity: 0; } }
 
-.dr-board {
-  min-height: 360px;
-  padding: 24px;
-  background: var(--slate);
-  color: var(--chalk);
-  border-radius: 6px;
-  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.08);
-}
-.dr-hint, .dr-error {
+.dr-hint, .dr-error, .dr-sure {
   margin: 0;
   font-family: "Patrick Hand", "Comic Sans MS", cursive;
-  font-size: 26px;
-  line-height: 1.35;
+  line-height: 1.3;
 }
-.dr-hint { color: var(--chalk-dim); }
-.dr-error { color: var(--error); }
+.dr-hint { font-size: 24px; color: var(--dim); }
+.dr-error { font-size: 22px; color: var(--error); min-height: 104px; }
+.dr-sure { font-size: 28px; color: var(--dim); }
+.dr-sure strong { display: block; font-weight: 400; font-size: 46px; line-height: 1.1; color: var(--chalk); }
 
-.dr-verdict { display: flex; align-items: baseline; gap: 20px; }
-.dr-digit {
-  font-family: "Patrick Hand", "Comic Sans MS", cursive;
-  font-size: 120px;
-  line-height: 1;
+/* Chalk bar chart: one column per digit */
+.dr-bars {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 6px;
+  height: 176px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
 }
-.dr-sure {
-  font-family: "Patrick Hand", "Comic Sans MS", cursive;
-  font-size: 28px;
-  color: var(--chalk-dim);
-}
-
-.dr-rows { display: grid; gap: 8px; margin: 20px 0 0; padding: 0; list-style: none; }
-.dr-row { display: grid; grid-template-columns: 24px 1fr 56px; align-items: center; gap: 12px; }
-.dr-label { font-family: "Patrick Hand", "Comic Sans MS", cursive; font-size: 22px; }
-.dr-track {
-  display: block;
-  height: 12px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
-  overflow: hidden;
-}
+.dr-col { display: grid; grid-template-rows: auto 1fr auto; gap: 4px; justify-items: center; min-width: 0; }
+.dr-pct { order: 1; min-height: 15px; font: 600 12px / 15px "Source Sans 3", system-ui, sans-serif; font-variant-numeric: tabular-nums; color: var(--dim); }
+.dr-track { order: 2; position: relative; width: 100%; border-radius: 6px; background: rgba(244, 243, 234, 0.08); overflow: hidden; }
+.dr-label { order: 3; font: 400 24px / 1 "Patrick Hand", "Comic Sans MS", cursive; color: var(--dim); }
 .dr-fill {
-  display: block;
-  height: 100%;
-  background: var(--chalk);
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   border-radius: 6px;
-  transition: width 0.4s ease;
+  background: var(--chalk);
+  transform-origin: bottom;
+  animation: dr-grow 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(var(--i) * 40ms);
 }
-.dr-fill-top { background: var(--sky); }
-.dr-pct { font-size: 14px; text-align: right; font-variant-numeric: tabular-nums; color: var(--chalk-dim); }
+@keyframes dr-grow { from { transform: scaleY(0); } }
+.dr-col.is-top .dr-fill { background: var(--gold); box-shadow: 0 0 16px rgba(245, 215, 110, 0.5); }
+.dr-col.is-top .dr-label, .dr-col.is-top .dr-pct { color: var(--gold); }
+
+/* The chalk ledge: sticks to the bottom of the screen, inside thumb reach */
+.dr-tray {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin: 22px -14px 0;
+  padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
+  border-top: 3px solid var(--oak-lo);
+  border-radius: 0 0 12px 12px;
+  background: linear-gradient(var(--oak-hi), var(--oak) 55%, #8f6a45);
+  box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.25);
+}
+.dr-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 56px;
+  border: 0;
+  font: 700 18px "Source Sans 3", system-ui, sans-serif;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.dr-btn:active:not(:disabled) { transform: translateY(3px); }
+.dr-btn:focus-visible { outline: 3px solid var(--sky); outline-offset: 3px; }
+.dr-btn:disabled { opacity: 0.6; cursor: wait; }
+
+.dr-eraser {
+  flex: 1 1 0;
+  max-width: 200px;
+  padding: 20px 12px 0;
+  border-radius: 10px;
+  color: #4a3622;
+  background: linear-gradient(#3b4442 0 20px, #e2d5b8 20px);
+  box-shadow: 0 5px 0 #8a7656, 0 10px 14px rgba(0, 0, 0, 0.3);
+}
+.dr-eraser:active { box-shadow: 0 2px 0 #8a7656, 0 4px 8px rgba(0, 0, 0, 0.3); }
+.dr-chalk {
+  flex: 2 1 0;
+  max-width: 340px;
+  padding: 0 16px;
+  border-radius: 14px;
+  color: #1b2f2b;
+  background: linear-gradient(#fcfbf4, #e4e2d3);
+  box-shadow: 0 5px 0 #a9a798, 0 10px 14px rgba(0, 0, 0, 0.3);
+}
+.dr-chalk:active:not(:disabled) { box-shadow: 0 2px 0 #a9a798, 0 4px 8px rgba(0, 0, 0, 0.3); }
+
+/* Tablets and desktops: board hugs its content, two columns */
+@media (min-width: 820px) {
+  .dr-app { padding: 40px 24px 56px; }
+  .dr-frame { flex: 0 0 auto; padding: 12px; border-radius: 22px; }
+  .dr-board { padding: 32px 32px 0; border-radius: 14px; }
+  .dr-layout { grid-template-columns: minmax(0, 420px) minmax(0, 1fr); align-items: start; gap: 36px; margin-top: 28px; }
+  .dr-bars { height: 230px; gap: 8px; }
+  .dr-tray { position: static; margin: 32px -32px 0; padding: 16px 32px; border-radius: 0 0 14px 14px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  .dr-fill { transition: none; }
+  .dr-app *, .dr-app *::before, .dr-app *::after { animation: none !important; transition: none !important; }
 }
 `;
