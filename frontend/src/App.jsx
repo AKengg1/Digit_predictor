@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-const API_URL = "http://localhost:8000/predict";
+const API_URL = "https://digit-predictor-0nyz.onrender.com/predict"||"http://localhost:8000/predict";
 const SIZE = 280; // drawing canvas is 280x280 (28 x 10)
 const BRUSH = 22; // stroke width in canvas pixels
 const INK_THRESHOLD = 20; // red value above this counts as "chalk"
