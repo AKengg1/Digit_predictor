@@ -29,8 +29,8 @@ app.add_middleware(
         "http://localhost:3000",
         "https://frontend-jade-six-96.vercel.app",
     ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["POST", "OPTIONS"],
+allow_headers=["Content-Type"],
 )
 
 
